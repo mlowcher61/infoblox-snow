@@ -96,5 +96,5 @@ ansible-playbook playbooks/snow_to_infoblox.yml \
 ```bash
 ansible-lint
 yamllint .
-molecule test -s default   # if molecule is installed
+ansible-playbook --syntax-check playbooks/snow_to_infoblox.yml
 ```

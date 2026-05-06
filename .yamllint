@@ -18,4 +18,3 @@ rules:
 ignore: |
   collections/ansible_collections/
   .ansible/
-  molecule/*/molecule_cache/

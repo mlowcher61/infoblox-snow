@@ -27,9 +27,5 @@ secrets.yml
 *_credentials.yml
 *_secrets.yml
 
-# Molecule artefacts
-.molecule/
-molecule/*/molecule_cache/
-
 # Downloaded CSVs from local testing
 /tmp/snow_request_*.csv
