@@ -1,0 +1,11 @@
+hostname,ip_address,dns_view,comment
+web01.example.com,10.20.30.11,default,Web frontend - production
+web02.example.com,10.20.30.12,default,Web frontend - production
+api01.example.com,10.20.40.21,default,API gateway - production
+api02.example.com,10.20.40.22,default,API gateway - production
+db01.example.com,10.20.50.31,internal,Primary DB - do not delete
+db02.example.com,10.20.50.32,internal,Replica DB
+cache01.example.com,10.20.60.41,internal,Redis cache node
+worker01.example.com,10.20.70.51,default,
+worker02.example.com,10.20.70.52,default,
+bastion.example.com,10.20.10.5,default,SSH bastion - on-call access

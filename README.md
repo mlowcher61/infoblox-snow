@@ -31,6 +31,10 @@ See [`roles/snow_to_infoblox/README.md`](roles/snow_to_infoblox/README.md) for t
 4. Apply the job template (`aap/job_template.yml`), attaching both credentials.
 5. Launch — survey will prompt for the sc_task `sys_id`.
 
+## Sample data
+
+A representative CSV is at [`examples/sample_hosts.csv`](examples/sample_hosts.csv) — 10 rows using the default column names (`hostname`, `ip_address`, `dns_view`, `comment`). Attach it to a sandbox sc_task to exercise the full flow, or use it as a column-layout reference when shaping the catalog item form in ServiceNow.
+
 ## Local quickstart
 
 ```bash
