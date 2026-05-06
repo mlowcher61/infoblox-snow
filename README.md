@@ -33,7 +33,9 @@ See [`roles/snow_to_infoblox/README.md`](roles/snow_to_infoblox/README.md) for t
 
 ## Sample data
 
-A representative CSV is at [`examples/sample_hosts.csv`](examples/sample_hosts.csv) — 10 rows using the default column names (`hostname`, `ip_address`, `dns_view`, `comment`). Attach it to a sandbox sc_task to exercise the full flow, or use it as a column-layout reference when shaping the catalog item form in ServiceNow.
+A representative CSV is at [`examples/sample_hosts.csv`](examples/sample_hosts.csv) — 9 rows in **Infoblox NIOS native CSV import format** (`HEADER-HostRecord, configure_for_dns, FQDN, ADDRESSES`). Attach it to a sandbox sc_task to exercise the full flow.
+
+The role does not parse the CSV itself — it hands the file to NIOS via the `csv_import` WAPI fileop, and NIOS validates columns + ingests rows server-side.
 
 ## Local quickstart
 

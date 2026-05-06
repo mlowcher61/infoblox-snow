@@ -5,15 +5,13 @@
 #   0. Preflight: assert credentials are present (env-injected by AAP)
 #   1. Fetch the catalog task from ServiceNow
 #   2. Locate and download the CSV attachment
-#   3. Parse the CSV
-#   4. Import records into Infoblox  ← block/rescue strategy
-#   5. Report back to the ServiceNow task and clean up
+#   3. Submit CSV to NIOS native csv_import (uploadinit → POST → csv_import)
+#   4. Poll csvimporttask until terminal status, gather counts
+#   5. Report back to ServiceNow + clean up
 
 # ===========================================================================
 # 0. PREFLIGHT
 # ===========================================================================
-# We inspect lookup('env', ...) directly (not the role vars) so a
-# misconfigured extra-var that blanked out a credential still trips this.
 - name: "Preflight | Initialise missing-vars list"
   ansible.builtin.set_fact:
     missing_credential_env_vars: []
@@ -47,8 +45,14 @@
       the AAP survey or `-e snow_task_sys_id=<sys_id>`. Got:
       "{{ snow_task_sys_id | default('') }}"
 
-# Build the provider dict ServiceNow modules expect, conditionally adding
-# OAuth fields only when that auth path is selected.
+- name: "Preflight | Validate infoblox_csv_operation"
+  ansible.builtin.assert:
+    that:
+      - infoblox_csv_operation in valid_csv_operations
+    fail_msg: >-
+      infoblox_csv_operation must be one of {{ valid_csv_operations | join(', ') }}.
+      Got: "{{ infoblox_csv_operation }}"
+
 - name: "Preflight | Compose ServiceNow provider block"
   ansible.builtin.set_fact:
     snow_provider: >-
@@ -59,6 +63,11 @@
             if snow_auth_type == 'oauth' else {}
           )
       }}
+
+- name: "Preflight | Build NIOS WAPI base URL"
+  ansible.builtin.set_fact:
+    wapi_base_url: "https://{{ infoblox_host }}/wapi/v{{ infoblox_wapi_version }}"
+    csv_local_path: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
 
 # ===========================================================================
 # 1. FETCH THE CATALOG TASK
@@ -135,101 +144,178 @@
     url_password: "{{ snow_password }}"
     force_basic_auth: true
     return_content: false
-    dest: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
+    dest: "{{ csv_local_path }}"
     status_code: 200
     headers:
       Accept: "text/csv"
   register: csv_download
-  no_log: true   # suppress request body — credentials show in headers
+  no_log: true
 
-- name: "ServiceNow | Confirm download succeeded"
+- name: "ServiceNow | Confirm downloaded CSV is non-empty"
   ansible.builtin.stat:
-    path: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
+    path: "{{ csv_local_path }}"
   register: csv_file_stat
   failed_when:
-    - not csv_file_stat.stat.exists
-    - csv_file_stat.stat.size == 0
+    - not csv_file_stat.stat.exists or csv_file_stat.stat.size == 0
 
 # ===========================================================================
-# 3. PARSE THE CSV
+# 3. SUBMIT CSV TO NIOS NATIVE csv_import
 # ===========================================================================
-- name: "CSV | Read rows"
-  community.general.read_csv:
-    path: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
-    key: "{{ csv_col_hostname }}"   # use hostname column as dict key
-  register: csv_data
-  # `dict` form would let us deduplicate, but we want to preserve order and
-  # surface duplicate hostnames as Infoblox conflicts. Use .list downstream.
+# NIOS uses a 3-step pattern for CSV import: uploadinit → POST file → csv_import.
+# Step 1 returns a one-time URL+token; the bulk file POST goes to that URL
+# (bypassing the WAPI's request pipeline); step 3 hands NIOS the token saying
+# "process the file already in your staging area."
 
-- name: "CSV | Show first row for column-mapping verification"
+- name: "Infoblox | Step 1 — uploadinit (request a one-time upload URL)"
+  ansible.builtin.uri:
+    url: "{{ wapi_base_url }}/fileop?_function=uploadinit"
+    method: POST
+    url_username: "{{ infoblox_user }}"
+    url_password: "{{ infoblox_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ infoblox_provider.validate_certs }}"
+    body_format: json
+    body:
+      filename: "{{ csv_attachment.file_name }}"
+    status_code: 200
+    return_content: true
+  register: nios_uploadinit
+  no_log: true
+
+- name: "Infoblox | Capture upload URL + token + session cookie"
+  ansible.builtin.set_fact:
+    nios_upload_url: "{{ nios_uploadinit.json.url }}"
+    nios_upload_token: "{{ nios_uploadinit.json.token }}"
+    # The Set-Cookie header from uploadinit must travel with the file POST —
+    # the http_direct_file_io endpoint validates this session cookie.
+    nios_session_cookie: "{{ nios_uploadinit.set_cookie | default('') }}"
+
+- name: "Infoblox | Step 2 — POST CSV to the one-time upload URL"
+  ansible.builtin.uri:
+    url: "{{ nios_upload_url }}"
+    method: POST
+    validate_certs: "{{ infoblox_provider.validate_certs }}"
+    # Pass session cookie from step 1 — basic auth is not honoured on
+    # the http_direct_file_io endpoint in some NIOS versions.
+    headers:
+      Cookie: "{{ nios_session_cookie }}"
+    body_format: form-multipart
+    body:
+      file:
+        filename: "{{ csv_local_path }}"
+        mime_type: text/csv
+    status_code: [200, 201, 204]
+  register: nios_file_upload
+  no_log: true
+
+- name: "Infoblox | Step 3 — csv_import (start the import job)"
+  ansible.builtin.uri:
+    url: "{{ wapi_base_url }}/fileop?_function=csv_import"
+    method: POST
+    url_username: "{{ infoblox_user }}"
+    url_password: "{{ infoblox_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ infoblox_provider.validate_certs }}"
+    body_format: json
+    body:
+      action: START
+      operation: "{{ infoblox_csv_operation }}"
+      on_error: CONTINUE
+      token: "{{ nios_upload_token }}"
+    status_code: 201
+    return_content: true
+  register: nios_csv_import_start
+  no_log: true
+
+- name: "Infoblox | Resolve csvimporttask reference"
+  ansible.builtin.set_fact:
+    # csv_import returns either a bare ref string ("csvimporttask/...") or
+    # an object with a _ref key, depending on NIOS version. Handle both.
+    csvimporttask_ref: >-
+      {{
+        nios_csv_import_start.json._ref
+        if (nios_csv_import_start.json is mapping)
+        else nios_csv_import_start.json
+      }}
+
+- name: "Infoblox | Show csvimporttask reference"
+  ansible.builtin.debug:
+    msg: "Started import task: {{ csvimporttask_ref }}"
+
+# ===========================================================================
+# 4. POLL THE csvimporttask UNTIL TERMINAL STATUS
+# ===========================================================================
+- name: "Infoblox | Build csvimporttask poll URL with extra return fields"
+  ansible.builtin.set_fact:
+    csvimporttask_poll_url: >-
+      {{ wapi_base_url }}/{{ csvimporttask_ref }}?_return_fields%2B={{
+      csvimporttask_return_fields | join(',') }}
+
+- name: "Infoblox | Poll csvimporttask until terminal status"
+  ansible.builtin.uri:
+    url: "{{ csvimporttask_poll_url }}"
+    method: GET
+    url_username: "{{ infoblox_user }}"
+    url_password: "{{ infoblox_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ infoblox_provider.validate_certs }}"
+    status_code: 200
+    return_content: true
+  register: nios_csv_status
+  until: nios_csv_status.json.status in csv_terminal_statuses
+  retries: "{{ csv_poll_retries }}"
+  delay: "{{ csv_poll_delay_seconds }}"
+  no_log: true
+
+- name: "Infoblox | Show final import status"
   ansible.builtin.debug:
     msg:
-      first_row: "{{ csv_data.list[0] | default({}) }}"
-      total_rows: "{{ csv_data.list | length }}"
-
-- name: "CSV | Fail if file is empty"
-  ansible.builtin.assert:
-    that:
-      - csv_data.list | length > 0
-    fail_msg: "CSV {{ csv_attachment.file_name }} contained no data rows."
-
-- name: "CSV | Verify required columns are present"
-  ansible.builtin.assert:
-    that:
-      - csv_col_hostname in csv_data.list[0]
-      - csv_col_ip in csv_data.list[0]
-    fail_msg: >-
-      CSV is missing required columns. Need {{ csv_col_hostname }} and
-      {{ csv_col_ip }} but row 0 only has:
-      {{ csv_data.list[0].keys() | list }}
-
-# ===========================================================================
-# 4. IMPORT INTO INFOBLOX
-# ===========================================================================
-# Strategy: per-record block/rescue. We continue past per-row failures so a
-# single bad row doesn't black-hole an entire 500-row batch. Failures are
-# collected into `import_failures` and reported back to ServiceNow.
-- name: "Infoblox | Initialise result accumulators"
-  ansible.builtin.set_fact:
-    import_created: []
-    import_existed: []
-    import_failures: []
-
-- name: "Infoblox | Import host records (continue-on-error per row)"
-  ansible.builtin.include_tasks: import_one_record.yml
-  loop: "{{ csv_data.list }}"
-  loop_control:
-    loop_var: csv_row
-    label: "{{ csv_row[csv_col_hostname] | default('<no-hostname>') }}"
+      status: "{{ nios_csv_status.json.status }}"
+      operation: "{{ nios_csv_status.json.operation | default('?') }}"
+      lines_processed: "{{ nios_csv_status.json.lines_processed | default(0) }}"
+      errors_count: "{{ nios_csv_status.json.errors_count | default(0) }}"
+      import_id: "{{ nios_csv_status.json.import_id | default('?') }}"
 
 # ===========================================================================
 # 5. REPORT BACK TO SERVICENOW + CLEAN UP
 # ===========================================================================
+- name: "Compute | Derive success/failure counts"
+  ansible.builtin.set_fact:
+    nios_lines_processed: "{{ nios_csv_status.json.lines_processed | default(0) | int }}"
+    nios_errors_count: "{{ nios_csv_status.json.errors_count | default(0) | int }}"
+    nios_final_status: "{{ nios_csv_status.json.status }}"
+
+- name: "Compute | Lines succeeded"
+  ansible.builtin.set_fact:
+    nios_lines_succeeded: "{{ nios_lines_processed | int - nios_errors_count | int }}"
+
 - name: "ServiceNow | Build work_notes summary"
   ansible.builtin.set_fact:
     snow_work_notes: |
-      Infoblox import complete for {{ csv_attachment.file_name }}.
+      Infoblox CSV import complete for {{ csv_attachment.file_name }}.
 
-      Created:    {{ import_created | length }}
-      Pre-existing: {{ import_existed | length }}
-      Failed:     {{ import_failures | length }}
-      Total rows: {{ csv_data.list | length }}
+      NIOS csvimporttask:  {{ csvimporttask_ref }}
+      Final status:        {{ nios_final_status }}
+      Operation:           {{ infoblox_csv_operation }}
+      Lines processed:     {{ nios_lines_processed }}
+      Lines succeeded:     {{ nios_lines_succeeded }}
+      Lines failed:        {{ nios_errors_count }}
 
-      {% if import_failures | length > 0 %}
-      Failures:
-      {% for f in import_failures %}
-        - {{ f.hostname }} ({{ f.ip }}): {{ f.error }}
-      {% endfor %}
+      {% if nios_errors_count | int > 0 %}
+      Per-row error details are available in the NIOS UI under
+      Administration → Workflow → CSV Job Manager → import_id
+      {{ nios_csv_status.json.import_id | default('(unknown)') }}.
       {% endif %}
 
 - name: "ServiceNow | Determine final task state"
   ansible.builtin.set_fact:
-    # If everything failed, don't close the task — leave it Work-In-Progress
-    # for a human. If even one record succeeded, we treat it as Closed Complete.
+    # Close as Closed Complete only on full success. Partial or total failure
+    # is left in the current state for human review — they can see the
+    # work_notes and pull the error log from NIOS.
     snow_final_state: >-
       {{
         snow_state_closed_complete
-        if (import_created | length + import_existed | length) > 0
+        if (nios_final_status == 'COMPLETED' and nios_errors_count | int == 0)
         else snow_task_result.record.state
       }}
 
@@ -246,25 +332,29 @@
 
 - name: "Cleanup | Remove downloaded CSV from /tmp"
   ansible.builtin.file:
-    path: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
+    path: "{{ csv_local_path }}"
     state: absent
 
 - name: "Final | Print run summary"
   ansible.builtin.debug:
     msg:
       task: "{{ snow_task_result.record.number }}"
-      created: "{{ import_created | length }}"
-      existed: "{{ import_existed | length }}"
-      failed: "{{ import_failures | length }}"
-      total: "{{ csv_data.list | length }}"
+      nios_status: "{{ nios_final_status }}"
+      processed: "{{ nios_lines_processed }}"
+      succeeded: "{{ nios_lines_succeeded }}"
+      failed: "{{ nios_errors_count }}"
 
-# Hard-fail at the very end if the run was a total wash, so AAP marks the
-# job red. Partial success is reported but not failed.
-- name: "Final | Fail the play if zero records were imported"
+# AAP marks the job red on a hard fail. We hard-fail when:
+#   - NIOS itself ended in FAILED/STOPPED, OR
+#   - 100% of processed lines failed (and lines_processed > 0)
+- name: "Final | Fail the play on total NIOS failure"
   ansible.builtin.fail:
     msg: >-
-      All {{ csv_data.list | length }} rows failed to import. See work_notes
-      on sc_task {{ snow_task_result.record.number }} for per-row errors.
-  when:
-    - (import_created | length + import_existed | length) == 0
-    - csv_data.list | length > 0
+      NIOS csv_import ended in status {{ nios_final_status }} with
+      {{ nios_errors_count }}/{{ nios_lines_processed }} failed lines.
+      See work_notes on sc_task {{ snow_task_result.record.number }} and
+      NIOS CSV Job Manager (import_id
+      {{ nios_csv_status.json.import_id | default('?') }}) for details.
+  when: >-
+    nios_final_status in ['FAILED', 'STOPPED']
+    or (nios_lines_processed | int > 0 and nios_lines_succeeded | int == 0)

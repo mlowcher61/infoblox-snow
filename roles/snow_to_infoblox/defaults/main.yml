@@ -7,11 +7,8 @@
 #    the custom credential types in aap/credential_types/. For local
 #    testing, just `export VAR=...` before running the playbook.
 #
-#    Defaults beat nothing else — if you need to override for a CI run, you
-#    can pass `-e snow_user=...` and it will win over the env lookup.
-#
-# 2. Non-secret runtime knobs (sys_id of the task, CSV column names, etc).
-#    Safe to commit. Override per-run via the AAP survey or `-e`.
+# 2. Non-secret runtime knobs (sys_id, NIOS csv_import operation, polling
+#    timeouts). Safe to commit. Override per-run via the AAP survey or `-e`.
 
 # ---------------------------------------------------------------------------
 # ServiceNow credentials (env-injected by AAP "ServiceNow ITSM" credential)
@@ -36,20 +33,28 @@ infoblox_wapi_version: "{{ lookup('env', 'INFOBLOX_WAPI_VERSION') | default('2.1
 # ---------------------------------------------------------------------------
 snow_task_sys_id: ""
 
-# CSV column → Infoblox host record field mapping. Override per-run via
-# the AAP survey if a particular ServiceNow form uses different headers.
-csv_col_hostname: "hostname"
-csv_col_ip: "ip_address"
-csv_col_dns_view: "dns_view"
-csv_col_comment: "comment"
+# NIOS csv_import operation. Choose based on what the source CSV represents:
+#   INSERT   — only add new records; fail any row whose key already exists
+#   OVERRIDE — replace existing records entirely with the CSV row
+#   MERGE    — update fields present in CSV; leave other fields untouched
+#   CUSTOM   — use the IMPORT-ACTION column on each row to pick per-row
+#   REPLACE  — bulk-replace all records of this type
+#   DELETE   — remove records named in the CSV
+#
+# Default MERGE is the gentlest: existing records get updated, new ones
+# get created, no fields are dropped. Switch to INSERT if your catalog
+# task only ever adds hosts (so a duplicate is a real error, not a sync).
+infoblox_csv_operation: MERGE
 
-# Default DNS view applied when the CSV row doesn't supply one.
-infoblox_default_view: "default"
+# How long to wait for the csvimporttask to reach a terminal state.
+# Total ceiling = csv_poll_retries * csv_poll_delay_seconds.
+# 60 * 5s = 5 minutes. Bump csv_poll_retries for very large imports.
+csv_poll_retries: 60
+csv_poll_delay_seconds: 5
 
 # Where to stage the downloaded CSV during the run. Tempfile in /tmp keeps
 # AAP execution-environment containers happy; the file is unlinked at the end.
 csv_download_dir: "/tmp"
 
 # State value that ServiceNow uses for "Closed Complete" on sc_task.
-# Numeric in the API; 3 is the OOTB ServiceNow value.
 snow_state_closed_complete: 3

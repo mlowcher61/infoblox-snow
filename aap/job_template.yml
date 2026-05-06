@@ -29,7 +29,7 @@ credentials:
 survey_enabled: true
 survey_spec:
   name: "ServiceNow Task Input"
-  description: "Provide the sc_task sys_id to process"
+  description: "Provide the sc_task sys_id and the NIOS import strategy"
   spec:
     - variable: snow_task_sys_id
       type: text
@@ -39,29 +39,26 @@ survey_spec:
       min: 32
       max: 32
 
-    # Optional: allow per-run overrides of CSV column names without editing
-    # the role. Defaults in roles/snow_to_infoblox/defaults/main.yml apply
-    # if the operator leaves these blank.
-    - variable: csv_col_hostname
-      type: text
-      question_name: "CSV column → hostname"
-      default: "hostname"
-      required: false
-    - variable: csv_col_ip
-      type: text
-      question_name: "CSV column → IP address"
-      default: "ip_address"
-      required: false
-    - variable: csv_col_dns_view
-      type: text
-      question_name: "CSV column → DNS view"
-      default: "dns_view"
-      required: false
-    - variable: csv_col_comment
-      type: text
-      question_name: "CSV column → comment"
-      default: "comment"
-      required: false
+    # NIOS csv_import operation. MERGE is the role default; surface here so
+    # an operator can tighten to INSERT (only-create) or widen to OVERRIDE
+    # for a specific batch without editing defaults/main.yml.
+    - variable: infoblox_csv_operation
+      type: multiplechoice
+      question_name: "NIOS csv_import operation"
+      question_description: |
+        INSERT  — fail rows whose key already exists (strict additive)
+        MERGE   — update existing rows, create missing rows (default)
+        OVERRIDE — replace entire records with CSV contents
+        CUSTOM  — per-row IMPORT-ACTION column drives behaviour
+      choices:
+        - INSERT
+        - MERGE
+        - OVERRIDE
+        - CUSTOM
+        - REPLACE
+        - DELETE
+      default: MERGE
+      required: true
 
 # Recommended: wire to a webhook so ServiceNow can trigger this template
 # directly from the catalog task workflow.
