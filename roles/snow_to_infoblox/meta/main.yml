@@ -1,0 +1,37 @@
+---
+galaxy_info:
+  role_name: snow_to_infoblox
+  namespace: automation
+  author: "Platform Automation"
+  description: >-
+    Read a ServiceNow catalog task, download its CSV attachment, and import
+    the records into Infoblox NIOS as host records. Designed for AAP with
+    custom credential types — no ansible-vault, no secrets in git.
+  license: MIT
+  min_ansible_version: "2.15"
+
+  platforms:
+    - name: EL
+      versions:
+        - "8"
+        - "9"
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+
+  galaxy_tags:
+    - servicenow
+    - infoblox
+    - itsm
+    - dns
+    - ipam
+    - networking
+
+dependencies: []
+
+collections:
+  - servicenow.itsm
+  - community.general
+  - infoblox.nios_modules
+  - ansible.builtin

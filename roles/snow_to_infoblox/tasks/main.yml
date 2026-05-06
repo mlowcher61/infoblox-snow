@@ -1,0 +1,270 @@
+---
+# snow_to_infoblox — main task flow.
+#
+# Sections:
+#   0. Preflight: assert credentials are present (env-injected by AAP)
+#   1. Fetch the catalog task from ServiceNow
+#   2. Locate and download the CSV attachment
+#   3. Parse the CSV
+#   4. Import records into Infoblox  ← block/rescue strategy
+#   5. Report back to the ServiceNow task and clean up
+
+# ===========================================================================
+# 0. PREFLIGHT
+# ===========================================================================
+# We inspect lookup('env', ...) directly (not the role vars) so a
+# misconfigured extra-var that blanked out a credential still trips this.
+- name: "Preflight | Initialise missing-vars list"
+  ansible.builtin.set_fact:
+    missing_credential_env_vars: []
+
+- name: "Preflight | Build list of unset/empty required env vars"
+  ansible.builtin.set_fact:
+    missing_credential_env_vars: "{{ missing_credential_env_vars + [item] }}"
+  loop: "{{ snow_required_env_vars + infoblox_required_env_vars }}"
+  when: lookup('env', item) | length == 0
+  changed_when: false
+
+- name: "Preflight | Fail with a clear message if any credential env var is missing"
+  ansible.builtin.assert:
+    that:
+      - missing_credential_env_vars | default([]) | length == 0
+    fail_msg: >-
+      Missing required credential environment variables:
+      {{ missing_credential_env_vars | default([]) | join(', ') }}.
+      In AAP, attach the "ServiceNow ITSM" and "Infoblox NIOS" custom
+      credentials to the job template. For local runs, export them in
+      your shell first (see README → Local Testing).
+    success_msg: "All required credential env vars are present."
+
+- name: "Preflight | Validate snow_task_sys_id was supplied"
+  ansible.builtin.assert:
+    that:
+      - snow_task_sys_id is string
+      - snow_task_sys_id | length == 32
+    fail_msg: >-
+      snow_task_sys_id must be a 32-char ServiceNow sys_id. Supply it via
+      the AAP survey or `-e snow_task_sys_id=<sys_id>`. Got:
+      "{{ snow_task_sys_id | default('') }}"
+
+# Build the provider dict ServiceNow modules expect, conditionally adding
+# OAuth fields only when that auth path is selected.
+- name: "Preflight | Compose ServiceNow provider block"
+  ansible.builtin.set_fact:
+    snow_provider: >-
+      {{
+        snow_provider_base
+        | combine(
+            {'client_id': snow_client_id, 'client_secret': snow_client_secret, 'grant_type': 'password'}
+            if snow_auth_type == 'oauth' else {}
+          )
+      }}
+
+# ===========================================================================
+# 1. FETCH THE CATALOG TASK
+# ===========================================================================
+- name: "ServiceNow | Get sc_task by sys_id"
+  servicenow.itsm.api:
+    instance: "{{ snow_provider }}"
+    resource: sc_task
+    action: get
+    sys_id: "{{ snow_task_sys_id }}"
+  register: snow_task_result
+
+- name: "ServiceNow | Fail if no task was returned"
+  ansible.builtin.assert:
+    that:
+      - snow_task_result.record is defined
+      - snow_task_result.record.sys_id is defined
+    fail_msg: "No sc_task found with sys_id={{ snow_task_sys_id }}"
+
+- name: "ServiceNow | Show task summary"
+  ansible.builtin.debug:
+    msg: >-
+      Task {{ snow_task_result.record.number }} — state
+      {{ snow_task_result.record.state }} — short description:
+      {{ snow_task_result.record.short_description | default('(none)') }}
+
+# ===========================================================================
+# 2. LOCATE AND DOWNLOAD THE CSV ATTACHMENT
+# ===========================================================================
+- name: "ServiceNow | List attachments on this sc_task"
+  servicenow.itsm.api:
+    instance: "{{ snow_provider }}"
+    resource: sys_attachment
+    action: get
+    query_params:
+      sysparm_query: "table_name=sc_task^table_sys_id={{ snow_task_sys_id }}"
+  register: snow_attachments_result
+
+- name: "ServiceNow | Filter for CSV attachments"
+  ansible.builtin.set_fact:
+    csv_attachments: >-
+      {{
+        snow_attachments_result.record
+        | default([])
+        | selectattr('file_name', 'match', '(?i).+\\.csv$')
+        | list
+      }}
+
+- name: "ServiceNow | Fail if no CSV attachment present"
+  ansible.builtin.assert:
+    that:
+      - csv_attachments | length > 0
+    fail_msg: >-
+      sc_task {{ snow_task_sys_id }} has no .csv attachment. Found
+      {{ snow_attachments_result.record | default([]) | length }} attachment(s)
+      total. Aborting.
+
+- name: "ServiceNow | Pick the most recent CSV (by sys_created_on)"
+  ansible.builtin.set_fact:
+    csv_attachment: "{{ csv_attachments | sort(attribute='sys_created_on') | last }}"
+
+- name: "ServiceNow | Show selected CSV"
+  ansible.builtin.debug:
+    msg: >-
+      Selected attachment {{ csv_attachment.file_name }}
+      ({{ csv_attachment.size_bytes }} bytes,
+      sys_id={{ csv_attachment.sys_id }})
+
+- name: "ServiceNow | Download CSV via /api/now/attachment/<sys_id>/file"
+  ansible.builtin.uri:
+    url: "https://{{ snow_instance }}/api/now/attachment/{{ csv_attachment.sys_id }}/file"
+    method: GET
+    url_username: "{{ snow_user }}"
+    url_password: "{{ snow_password }}"
+    force_basic_auth: true
+    return_content: false
+    dest: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
+    status_code: 200
+    headers:
+      Accept: "text/csv"
+  register: csv_download
+  no_log: true   # suppress request body — credentials show in headers
+
+- name: "ServiceNow | Confirm download succeeded"
+  ansible.builtin.stat:
+    path: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
+  register: csv_file_stat
+  failed_when:
+    - not csv_file_stat.stat.exists
+    - csv_file_stat.stat.size == 0
+
+# ===========================================================================
+# 3. PARSE THE CSV
+# ===========================================================================
+- name: "CSV | Read rows"
+  community.general.read_csv:
+    path: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
+    key: "{{ csv_col_hostname }}"   # use hostname column as dict key
+  register: csv_data
+  # `dict` form would let us deduplicate, but we want to preserve order and
+  # surface duplicate hostnames as Infoblox conflicts. Use .list downstream.
+
+- name: "CSV | Show first row for column-mapping verification"
+  ansible.builtin.debug:
+    msg:
+      first_row: "{{ csv_data.list[0] | default({}) }}"
+      total_rows: "{{ csv_data.list | length }}"
+
+- name: "CSV | Fail if file is empty"
+  ansible.builtin.assert:
+    that:
+      - csv_data.list | length > 0
+    fail_msg: "CSV {{ csv_attachment.file_name }} contained no data rows."
+
+- name: "CSV | Verify required columns are present"
+  ansible.builtin.assert:
+    that:
+      - csv_col_hostname in csv_data.list[0]
+      - csv_col_ip in csv_data.list[0]
+    fail_msg: >-
+      CSV is missing required columns. Need {{ csv_col_hostname }} and
+      {{ csv_col_ip }} but row 0 only has:
+      {{ csv_data.list[0].keys() | list }}
+
+# ===========================================================================
+# 4. IMPORT INTO INFOBLOX
+# ===========================================================================
+# Strategy: per-record block/rescue. We continue past per-row failures so a
+# single bad row doesn't black-hole an entire 500-row batch. Failures are
+# collected into `import_failures` and reported back to ServiceNow.
+- name: "Infoblox | Initialise result accumulators"
+  ansible.builtin.set_fact:
+    import_created: []
+    import_existed: []
+    import_failures: []
+
+- name: "Infoblox | Import host records (continue-on-error per row)"
+  ansible.builtin.include_tasks: import_one_record.yml
+  loop: "{{ csv_data.list }}"
+  loop_control:
+    loop_var: csv_row
+    label: "{{ csv_row[csv_col_hostname] | default('<no-hostname>') }}"
+
+# ===========================================================================
+# 5. REPORT BACK TO SERVICENOW + CLEAN UP
+# ===========================================================================
+- name: "ServiceNow | Build work_notes summary"
+  ansible.builtin.set_fact:
+    snow_work_notes: |
+      Infoblox import complete for {{ csv_attachment.file_name }}.
+
+      Created:    {{ import_created | length }}
+      Pre-existing: {{ import_existed | length }}
+      Failed:     {{ import_failures | length }}
+      Total rows: {{ csv_data.list | length }}
+
+      {% if import_failures | length > 0 %}
+      Failures:
+      {% for f in import_failures %}
+        - {{ f.hostname }} ({{ f.ip }}): {{ f.error }}
+      {% endfor %}
+      {% endif %}
+
+- name: "ServiceNow | Determine final task state"
+  ansible.builtin.set_fact:
+    # If everything failed, don't close the task — leave it Work-In-Progress
+    # for a human. If even one record succeeded, we treat it as Closed Complete.
+    snow_final_state: >-
+      {{
+        snow_state_closed_complete
+        if (import_created | length + import_existed | length) > 0
+        else snow_task_result.record.state
+      }}
+
+- name: "ServiceNow | Update sc_task with results"
+  servicenow.itsm.api:
+    instance: "{{ snow_provider }}"
+    resource: sc_task
+    action: patch
+    sys_id: "{{ snow_task_sys_id }}"
+    data:
+      work_notes: "{{ snow_work_notes }}"
+      state: "{{ snow_final_state }}"
+  register: snow_update_result
+
+- name: "Cleanup | Remove downloaded CSV from /tmp"
+  ansible.builtin.file:
+    path: "{{ csv_download_dir }}/snow_request_{{ snow_task_sys_id }}.csv"
+    state: absent
+
+- name: "Final | Print run summary"
+  ansible.builtin.debug:
+    msg:
+      task: "{{ snow_task_result.record.number }}"
+      created: "{{ import_created | length }}"
+      existed: "{{ import_existed | length }}"
+      failed: "{{ import_failures | length }}"
+      total: "{{ csv_data.list | length }}"
+
+# Hard-fail at the very end if the run was a total wash, so AAP marks the
+# job red. Partial success is reported but not failed.
+- name: "Final | Fail the play if zero records were imported"
+  ansible.builtin.fail:
+    msg: >-
+      All {{ csv_data.list | length }} rows failed to import. See work_notes
+      on sc_task {{ snow_task_result.record.number }} for per-row errors.
+  when:
+    - (import_created | length + import_existed | length) == 0
+    - csv_data.list | length > 0

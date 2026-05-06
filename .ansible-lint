@@ -1,0 +1,25 @@
+---
+profile: production
+
+exclude_paths:
+  - .cache/
+  - .github/
+  - collections/ansible_collections/
+  - molecule/
+
+# We use lookup('env', ...) heavily; this rule complains about runtime
+# env coupling but that's the entire point of the AAP injector pattern.
+# jinja[invalid]: set_fact lines that build dicts can trip false positives.
+# var-naming[no-role-prefix]: internal accumulator vars don't need the prefix.
+# no-handler: we use `when: result.changed` in a per-row include_tasks loop;
+#   handlers fire at end-of-play, which would break per-iteration accumulators.
+skip_list:
+  - jinja[invalid]
+  - var-naming[no-role-prefix]
+  - no-handler
+
+# Treat warnings as errors so CI doesn't drift.
+warn_list: []
+
+# Keep tasks named in a consistent "Section | Verb" form.
+task_name_prefix: "{stem} | "

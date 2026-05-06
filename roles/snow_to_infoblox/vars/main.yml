@@ -1,0 +1,31 @@
+---
+# Internal constants. Anything that must NOT be overridden by extra-vars
+# lives here. Anything an operator might reasonably tweak lives in defaults.
+
+# Names of the env vars the preflight task asserts are non-empty.
+# Kept here so the assert message and the actual lookup stay in sync.
+snow_required_env_vars:
+  - SNOW_INSTANCE
+  - SNOW_USER
+  - SNOW_PASSWORD
+
+infoblox_required_env_vars:
+  - INFOBLOX_HOST
+  - INFOBLOX_USER
+  - INFOBLOX_PASSWORD
+
+# Provider block reused by every servicenow.itsm.* call so we don't repeat
+# six lines on every task. Auth-type-specific fields are conditionally
+# included by Jinja `combine` in tasks/main.yml.
+snow_provider_base:
+  instance: "https://{{ snow_instance }}"
+  username: "{{ snow_user }}"
+  password: "{{ snow_password }}"
+
+# Provider block reused by every infoblox.nios_modules.* call.
+infoblox_provider:
+  host: "{{ infoblox_host }}"
+  username: "{{ infoblox_user }}"
+  password: "{{ infoblox_password }}"
+  wapi_version: "{{ infoblox_wapi_version }}"
+  validate_certs: true

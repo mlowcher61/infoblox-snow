@@ -1,0 +1,46 @@
+---
+# AAP Custom Credential Type: Infoblox NIOS
+#
+# Apply via the AAP UI (Administration → Credential Types → Add) or the
+# automation-controller collection:
+#   ansible.controller.credential_type
+#
+# At job launch, AAP renders `injectors.env` and the role reads the values
+# via `lookup('env', ...)` in defaults/main.yml. The infoblox.nios_modules
+# collection also recognises these env names natively, so any module in the
+# collection picks them up without further configuration.
+
+name: "Infoblox NIOS"
+kind: cloud
+description: >-
+  Credentials for Infoblox NIOS Grid Master access via WAPI. Consumed by
+  infoblox.nios_modules.* (which honours INFOBLOX_HOST/USER/PASSWORD env vars).
+
+inputs:
+  fields:
+    - id: infoblox_host
+      type: string
+      label: "Infoblox Grid Master Host/IP"
+      help_text: "FQDN or IP of the Grid Master (no scheme)"
+    - id: infoblox_user
+      type: string
+      label: "Username"
+    - id: infoblox_password
+      type: string
+      label: "Password"
+      secret: true
+    - id: infoblox_wapi_version
+      type: string
+      label: "WAPI Version"
+      default: "2.11"
+  required:
+    - infoblox_host
+    - infoblox_user
+    - infoblox_password
+
+injectors:
+  env:
+    INFOBLOX_HOST: "{{ infoblox_host }}"
+    INFOBLOX_USER: "{{ infoblox_user }}"
+    INFOBLOX_PASSWORD: "{{ infoblox_password }}"
+    INFOBLOX_WAPI_VERSION: "{{ infoblox_wapi_version }}"

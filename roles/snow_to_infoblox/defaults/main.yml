@@ -1,0 +1,55 @@
+---
+# Defaults for snow_to_infoblox.
+#
+# Two classes of variables live here:
+#
+# 1. Credentials sourced from environment variables. AAP injects these via
+#    the custom credential types in aap/credential_types/. For local
+#    testing, just `export VAR=...` before running the playbook.
+#
+#    Defaults beat nothing else — if you need to override for a CI run, you
+#    can pass `-e snow_user=...` and it will win over the env lookup.
+#
+# 2. Non-secret runtime knobs (sys_id of the task, CSV column names, etc).
+#    Safe to commit. Override per-run via the AAP survey or `-e`.
+
+# ---------------------------------------------------------------------------
+# ServiceNow credentials (env-injected by AAP "ServiceNow ITSM" credential)
+# ---------------------------------------------------------------------------
+snow_instance: "{{ lookup('env', 'SNOW_INSTANCE') }}"
+snow_user: "{{ lookup('env', 'SNOW_USER') }}"
+snow_password: "{{ lookup('env', 'SNOW_PASSWORD') }}"
+snow_auth_type: "{{ lookup('env', 'SNOW_AUTH_TYPE') | default('basic', true) }}"
+snow_client_id: "{{ lookup('env', 'SNOW_CLIENT_ID') }}"
+snow_client_secret: "{{ lookup('env', 'SNOW_CLIENT_SECRET') }}"
+
+# ---------------------------------------------------------------------------
+# Infoblox credentials (env-injected by AAP "Infoblox NIOS" credential)
+# ---------------------------------------------------------------------------
+infoblox_host: "{{ lookup('env', 'INFOBLOX_HOST') }}"
+infoblox_user: "{{ lookup('env', 'INFOBLOX_USER') }}"
+infoblox_password: "{{ lookup('env', 'INFOBLOX_PASSWORD') }}"
+infoblox_wapi_version: "{{ lookup('env', 'INFOBLOX_WAPI_VERSION') | default('2.11', true) }}"
+
+# ---------------------------------------------------------------------------
+# Non-secret runtime knobs (overridden by AAP survey / extra-vars)
+# ---------------------------------------------------------------------------
+snow_task_sys_id: ""
+
+# CSV column → Infoblox host record field mapping. Override per-run via
+# the AAP survey if a particular ServiceNow form uses different headers.
+csv_col_hostname: "hostname"
+csv_col_ip: "ip_address"
+csv_col_dns_view: "dns_view"
+csv_col_comment: "comment"
+
+# Default DNS view applied when the CSV row doesn't supply one.
+infoblox_default_view: "default"
+
+# Where to stage the downloaded CSV during the run. Tempfile in /tmp keeps
+# AAP execution-environment containers happy; the file is unlinked at the end.
+csv_download_dir: "/tmp"
+
+# State value that ServiceNow uses for "Closed Complete" on sc_task.
+# Numeric in the API; 3 is the OOTB ServiceNow value.
+snow_state_closed_complete: 3

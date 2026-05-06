@@ -1,0 +1,59 @@
+---
+# AAP Custom Credential Type: ServiceNow
+#
+# Apply via the AAP UI (Administration → Credential Types → Add) or the
+# automation-controller collection:
+#   ansible.controller.credential_type
+# Then create a Credential of this type and attach it to the job template.
+#
+# At job launch, AAP renders `injectors.env` and exposes the values as
+# environment variables to the playbook process. The role reads them via
+# `lookup('env', ...)` in defaults/main.yml.
+
+name: "ServiceNow ITSM"
+kind: cloud
+description: >-
+  Credentials for ServiceNow instance access (basic or OAuth). Consumed by
+  servicenow.itsm.* modules and by direct attachment downloads via uri.
+
+inputs:
+  fields:
+    - id: snow_instance
+      type: string
+      label: "ServiceNow Instance Hostname"
+      help_text: "FQDN only, e.g. mycompany.service-now.com (no scheme)"
+    - id: snow_user
+      type: string
+      label: "Username"
+    - id: snow_password
+      type: string
+      label: "Password"
+      secret: true
+    - id: snow_auth_type
+      type: string
+      label: "Auth Type"
+      choices:
+        - basic
+        - oauth
+      default: basic
+    - id: snow_client_id
+      type: string
+      label: "OAuth Client ID"
+      secret: true
+    - id: snow_client_secret
+      type: string
+      label: "OAuth Client Secret"
+      secret: true
+  required:
+    - snow_instance
+    - snow_user
+    - snow_password
+
+injectors:
+  env:
+    SNOW_INSTANCE: "{{ snow_instance }}"
+    SNOW_USER: "{{ snow_user }}"
+    SNOW_PASSWORD: "{{ snow_password }}"
+    SNOW_AUTH_TYPE: "{{ snow_auth_type }}"
+    SNOW_CLIENT_ID: "{{ snow_client_id }}"
+    SNOW_CLIENT_SECRET: "{{ snow_client_secret }}"

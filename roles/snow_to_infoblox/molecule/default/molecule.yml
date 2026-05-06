@@ -1,0 +1,42 @@
+---
+# Molecule "lint-only" scenario.
+#
+# A real integration test would mock ServiceNow + Infoblox HTTP layers,
+# which is heavy. For now we only verify the role syntax-checks and
+# preflight correctly fails when env vars are missing — that's the
+# highest-value cheap test.
+
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ../../../../collections/requirements.yml
+
+driver:
+  name: default
+
+platforms:
+  - name: localhost
+    groups:
+      - all
+
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      callbacks_enabled: profile_tasks
+  inventory:
+    hosts:
+      all:
+        hosts:
+          localhost:
+            ansible_connection: local
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - syntax
+    - converge
+    - verify

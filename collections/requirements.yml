@@ -1,0 +1,10 @@
+---
+collections:
+  - name: servicenow.itsm
+    version: ">=2.6.0"
+  - name: community.general
+    version: ">=8.0.0"
+  - name: infoblox.nios_modules
+    version: ">=1.7.0"
+  - name: ansible.utils
+    version: ">=4.1.0"

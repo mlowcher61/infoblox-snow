@@ -1,0 +1,11 @@
+---
+# Placeholder verifier. With real test infrastructure, this is where you'd
+# assert against a mocked Infoblox/SNOW backend.
+
+- name: "Verify"
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: "No-op verifier"
+      ansible.builtin.debug:
+        msg: "Molecule scenario completed."

@@ -1,0 +1,63 @@
+---
+# Per-row Infoblox import. Included from main.yml in a loop over csv_data.list.
+#
+# Loop variable: csv_row (one CSV row, e.g. {hostname: web01, ip_address: ...})
+#
+# Strategy: A — trust nios_host_record idempotency.
+#   - state=present creates if absent, updates if present (including IP changes).
+#   - We do NOT lookup-first; one API call per row.
+#   - Trade-off: a CSV with a hostname that already points at a different IP
+#     in Infoblox WILL silently re-IP that host. Switch to strategy B or C
+#     (see git history of this file) if that's a concern in production.
+#
+# Updates one of three accumulator lists per row:
+#   import_created  — newly-created OR updated records (changed=true)
+#   import_existed  — records already in desired state (changed=false)
+#   import_failures — handled in the rescue block, hostname/ip/error dict
+#
+# Block/rescue is per-row — a single bad row never aborts the outer loop.
+
+- name: "Infoblox | Process row {{ csv_row[csv_col_hostname] }}"
+  block:
+    # Strategy A — trust nios_host_record's idempotency. state=present
+    # creates if absent, updates in place if present (including IP changes).
+    # changed=true ⇒ the record was created or modified this run.
+    # changed=false ⇒ Infoblox already had it in the desired state.
+    - name: "Infoblox | Create or update host record"
+      infoblox.nios_modules.nios_host_record:
+        name: "{{ csv_row[csv_col_hostname] }}"
+        ipv4addrs:
+          - ipv4addr: "{{ csv_row[csv_col_ip] }}"
+        view: "{{ csv_row[csv_col_dns_view] | default(infoblox_default_view, true) }}"
+        comment: "{{ csv_row[csv_col_comment] | default(omit) }}"
+        state: present
+        provider: "{{ infoblox_provider }}"
+      register: nios_result
+
+    - name: "Infoblox | Track newly-created/updated records"
+      ansible.builtin.set_fact:
+        import_created: "{{ import_created + [{'hostname': csv_row[csv_col_hostname], 'ip': csv_row[csv_col_ip]}] }}"
+      when: nios_result.changed
+
+    - name: "Infoblox | Track records that were already in desired state"
+      ansible.builtin.set_fact:
+        import_existed: "{{ import_existed + [{'hostname': csv_row[csv_col_hostname], 'ip': csv_row[csv_col_ip]}] }}"
+      when: not nios_result.changed
+
+  rescue:
+    - name: "Record this row as a failure (continue with the loop)"
+      ansible.builtin.set_fact:
+        import_failures: >-
+          {{
+            import_failures + [{
+              'hostname': csv_row[csv_col_hostname] | default('<missing>'),
+              'ip':       csv_row[csv_col_ip]       | default('<missing>'),
+              'error':    ansible_failed_result.msg | default('unknown failure')
+            }]
+          }}
+
+    - name: "Log the failure (no_log on the original task hides creds; this is safe)"
+      ansible.builtin.debug:
+        msg: >-
+          FAIL row {{ csv_row[csv_col_hostname] | default('<missing>') }}:
+          {{ ansible_failed_result.msg | default('(no message)') }}

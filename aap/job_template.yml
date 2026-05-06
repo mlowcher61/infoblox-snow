@@ -1,0 +1,68 @@
+---
+# Example Job Template definition for the snow_to_infoblox role.
+#
+# Apply via the AAP UI (Resources → Templates → Add → Job Template) or the
+# automation-controller collection:
+#   ansible.controller.job_template
+#
+# Prerequisites (create these first):
+#   1. Project pointing at this git repo (with collections/requirements.yml).
+#   2. Inventory (any inventory; the role runs on localhost).
+#   3. Two custom credential types from aap/credential_types/ applied:
+#        - "ServiceNow ITSM"
+#        - "Infoblox NIOS"
+#   4. Two Credentials of those types populated with real values.
+
+name: "ServiceNow → Infoblox CSV Import"
+job_type: run
+inventory: "Demo Inventory"            # replace with your inventory
+project: "snow-infoblox-automation"    # replace with your project
+playbook: "playbooks/snow_to_infoblox.yml"
+
+# Attach BOTH custom credentials. AAP merges their injectors so all env
+# vars (SNOW_*, INFOBLOX_*) land in the playbook process at launch.
+credentials:
+  - "ServiceNow ITSM Production"       # Credential of type "ServiceNow ITSM"
+  - "Infoblox NIOS Production"         # Credential of type "Infoblox NIOS"
+
+# Survey: prompts the operator for the catalog task at launch time.
+survey_enabled: true
+survey_spec:
+  name: "ServiceNow Task Input"
+  description: "Provide the sc_task sys_id to process"
+  spec:
+    - variable: snow_task_sys_id
+      type: text
+      question_name: "ServiceNow sc_task sys_id"
+      question_description: "32-char sys_id of the catalog task to process"
+      required: true
+      min: 32
+      max: 32
+
+    # Optional: allow per-run overrides of CSV column names without editing
+    # the role. Defaults in roles/snow_to_infoblox/defaults/main.yml apply
+    # if the operator leaves these blank.
+    - variable: csv_col_hostname
+      type: text
+      question_name: "CSV column → hostname"
+      default: "hostname"
+      required: false
+    - variable: csv_col_ip
+      type: text
+      question_name: "CSV column → IP address"
+      default: "ip_address"
+      required: false
+    - variable: csv_col_dns_view
+      type: text
+      question_name: "CSV column → DNS view"
+      default: "dns_view"
+      required: false
+    - variable: csv_col_comment
+      type: text
+      question_name: "CSV column → comment"
+      default: "comment"
+      required: false
+
+# Recommended: wire to a webhook so ServiceNow can trigger this template
+# directly from the catalog task workflow.
+# webhook_service: github   # or gitlab — depends on your AAP integration
